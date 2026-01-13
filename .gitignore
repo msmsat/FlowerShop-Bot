@@ -1,0 +1,7 @@
+__pycache__/
+venv/
+.env
+flower_shop.db
+*.db
+.idea/
+.vscode/
