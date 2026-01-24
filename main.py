@@ -309,222 +309,6 @@ async def show_creation_menu(message: Message, user_id: int):
             pass # Если уже удалено
         await message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb), parse_mode="HTML")
 
-
-# --- ПРОВЕРКА КРИПТЫ ---
-@dp.callback_query(F.data.startswith("check_pay_crypto_"))
-async def check_crypto_payment(call: CallbackQuery, state: FSMContext):
-    invoice_id = call.data.split("_")[3]
-    print(invoice_id)
-
-    # Простейшая проверка (здесь используем твой URL api)
-    # Внимание: тут нужно скопировать логику запроса getInvoices из services,
-    # или создать отдельную функцию get_crypto_status(invoice_id)
-
-    # 1. Добавляем await, так как функция асинхронная
-    status = await payment_services.check_crypto_invoice_status(invoice_id)
-    print(status)
-
-    # 2. Проверяем, что статус именно 'paid'
-    if status == 'paid':
-        await call.answer("✅ Оплата получена!")
-        # Вызываем финал!
-        await finalize_order(call.message, state, call.from_user.id, "💎 CryptoBot (Оплачено)", "Заказ оплачен онлайн. Спасибо! 🤝")
-    else:
-        await call.answer("❌ Оплата еще не видна. Подождите минуту.", show_alert=True)
-
-
-# --- ПРОВЕРКА ПЕРЕД ОПЛАТОЙ (Pre-Checkout) ---
-@dp.pre_checkout_query()
-async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
-    # Здесь можно добавить проверку наличия товара в БД, если нужно.
-    # ok=True означает, что мы разрешаем транзакцию.
-    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-    return
-
-
-# --- УСПЕШНАЯ ОПЛАТА (Successful Payment) ---
-@dp.message(F.successful_payment)
-async def process_successful_payment(message: Message, state: FSMContext):
-    user_id = message.from_user.id
-    payment_info = message.successful_payment
-
-    total_amount = payment_info.total_amount / 100  # Переводим копейки обратно в валюту
-    currency = payment_info.currency
-
-    # Формируем красивый текст для админа
-    payment_label = f"💳 Portmone (Оплачено: {total_amount} {currency})"
-    end_text = "Оплата прошла успешно! Мы уже начали собирать ваш букет. 💐"
-
-    # Вызываем нашу универсальную функцию финализации
-    # Она отправит отчет админу, очистит корзину и стейт
-    await finalize_order(message, state, user_id, payment_label, end_text)
-
-@dp.callback_query(OrderState.waiting_for_payment_type)
-async def process_payment_selection(call: CallbackQuery, state: FSMContext):
-    payment_type = call.data
-    user = call.from_user
-    user_id = user.id
-
-    # Если нажали "Назад"
-    if payment_type == "back_to_pay_choice":
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Криптовалюта (USDT)", callback_data="pay_crypto")],
-            [InlineKeyboardButton(text="🟠 Portmone (UAH)", callback_data="pay_portmone")],
-            [InlineKeyboardButton(text="💵 На месте", callback_data="pay_onsite")]
-        ])
-        await call.message.edit_text("Выберите удобный способ оплаты:", reply_markup=kb)
-        return
-
-    # Получаем товары
-    items = await get_cart(user_id)
-    if not items:
-        await call.answer("Корзина пуста!", show_alert=True)
-        return
-    total_price = sum(price * qty for _, _, price, qty, _, _ in items)
-
-    # --- 1. КРИПТОВАЛЮТА ---
-    if payment_type == "pay_crypto":
-        await call.message.edit_text("⏳ Создаем счет в CryptoBot...")
-        amount_usdt = round(total_price / 100, 2)
-
-        # !!! ИСПРАВЛЕНИЕ НИЖЕ !!!
-        # Распаковываем 3 значения, которые возвращает payment_services.py
-        full_json, invoice_id, invoice_url = await payment_services.create_crypto_invoice(
-            amount_usdt, f"Order {user_id}", str(user_id)
-        )
-
-        if not invoice_url:
-            await call.message.edit_text("Ошибка создания счета CryptoBot.")
-            return
-
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"👉 Оплатить {amount_usdt} USDT", url=invoice_url)],
-            # Используем invoice_id, который мы получили при распаковке
-            [InlineKeyboardButton(text="🔄 Я оплатил", callback_data=f"check_pay_crypto_{invoice_id}")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_pay_choice")]
-        ])
-
-        await call.message.edit_text(
-            f"💎 <b>Оплата CryptoBot</b>\nСумма: {amount_usdt} USDT", reply_markup=kb, parse_mode="HTML"
-        )
-        return
-
-    # --- 2. PORTMONE (Telegram Payments) ---
-    if payment_type == "pay_portmone":
-        if not PORTMONE_TOKEN:
-            await call.answer("Ошибка: Токен оплаты не настроен", show_alert=True)
-            return
-
-        await call.message.delete()
-        await call.message.answer("⏳ Формируем счет...")
-
-        # Цена в копейках (total_price * 100)
-        price_amount = total_price * 100
-
-        prices = [LabeledPrice(label="Заказ цветов", amount=price_amount)]
-        payload = f"order_{user_id}_{int(datetime.now().timestamp())}"
-
-        await bot.send_invoice(
-            chat_id=call.message.chat.id,
-            title="Оплата заказа",
-            description=f"Заказ цветов для {user.full_name}. Сумма: {total_price} UAH",
-            payload=payload,
-            provider_token=PORTMONE_TOKEN,
-            currency="UAH",
-            prices=prices,
-            start_parameter=f"pay_{user_id}",
-            need_shipping_address=False,
-            is_flexible=False
-        )
-        return
-
-    # --- 3. НА МЕСТЕ ---
-    payment_label = ""
-    end_text = ""
-
-    if payment_type == "pay_onsite":
-        payment_label = "💵 На месте"
-        end_text = "Оплата курьеру при получении. ❤️"
-    else:
-        await call.answer()
-        return
-    await finalize_order(call.message, state, user_id, payment_label, end_text)
-
-
-# --- 1. Обновляем команду /start ---
-@dp.message(F.text == "/start")
-async def cmd_start(message: Message):
-    all_products = await get_all_products()
-    bouquets = [p for p in all_products if p[4] == "bouquet"]
-
-    kb = []
-    # Кнопки теперь ведут на просмотр (view_product_)
-    for pid, name, price, desc, p_type, _ in bouquets:
-        kb.append([InlineKeyboardButton(text=f"👁 {name} — {price} ₽", callback_data=f"view_product_{pid}")])
-
-    kb.append([InlineKeyboardButton(text="🌸 Создать свой букет", callback_data="create_bouquet")])
-    kb.append([InlineKeyboardButton(text="🧺 Перейти в корзину", callback_data="view_cart")])
-
-    await message.answer(
-        "🌿 <b>Bloom & Vibe</b>\n\nНажмите на название букета, чтобы увидеть фото и описание. 👇",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
-        parse_mode="HTML"
-    )
-
-user_states = {}
-
-
-
-# --- ШАГ 1: ПОЛУЧАЕМ АДРЕС ---
-@dp.message(OrderState.waiting_for_address)
-async def process_address_input(message: Message, state: FSMContext):
-    print('1')
-    address = message.text  # То, что написал пользователь
-    print('2')
-
-    # Сохраняем адрес во временное хранилище
-    await state.update_data(temp_address=address)
-
-    # Переходим к шагу подтверждения
-    await state.set_state(OrderState.waiting_for_address)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, всё верно", callback_data="addr_confirm_yes")]
-    ])
-
-    await message.answer(
-        f"Проверим адрес:\n\n<b>{address}</b>\n\nВсё верно?\n<b>Если нет просто отправьте тот адресс который нужно</b>",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-    return
-
-@dp.message(OrderState.waiting_for_time)
-async def process_time_input(message: Message, state: FSMContext):
-    delivery_time = message.text
-
-    # Сохраняем время
-    await state.update_data(delivery_time=delivery_time)
-
-    # Переходим к выбору оплаты
-    await state.set_state(OrderState.waiting_for_payment_type)
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 Криптовалюта (USDT)", callback_data="pay_crypto"),
-         InlineKeyboardButton(text="🟠 Portmone (Карта)", callback_data="pay_portmone")], # <--- Добавили
-        [InlineKeyboardButton(text="💵 На месте (при получении)", callback_data="pay_onsite")]
-    ])
-
-    await message.answer(
-        f"✅ Время доставки: <b>{delivery_time}</b>\n\n"
-        "Остался последний шаг. Выберите удобный способ оплаты: 👇",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-    return
-
-
-# --- Универсальная функция завершения заказа ---
 # --- Универсальная функция завершения заказа ---
 async def finalize_order(message: Message, state: FSMContext, user_id: int, payment_label: str, end_text: str):
     user = message.from_user
@@ -567,12 +351,9 @@ async def finalize_order(message: Message, state: FSMContext, user_id: int, paym
         f"〰〰〰〰〰〰〰\n"
         f"💰 <b>ИТОГО: {total_price} ₽</b>"
     )
-
     if ADMIN_ID:
-        try:
-            await bot.send_message(ADMIN_ID, admin_report, parse_mode="HTML")
-        except Exception as e:
-            print(f"Ошибка отправки админу: {e}")
+        try: await bot.send_message(ADMIN_ID, admin_report, parse_mode="HTML")
+        except Exception as e: print(f"Ошибка отправки админу: {e}")
 
     # 6. Очистка
     await clear_cart(user_id)
@@ -582,10 +363,7 @@ async def finalize_order(message: Message, state: FSMContext, user_id: int, paym
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🌸 В главное меню", callback_data="main_menu")]
     ])
-
-    # Контакт флориста (замените @YourFlorist на реальный юзернейм)
     florist_contact = "@matvey_sadovsky"
-
     await message.answer(
         f"🎉 <b>Ваш заказ #{order_ref} принят!</b>\n\n"
         f"Способ оплаты: <i>{payment_label}</i>\n"
@@ -600,6 +378,122 @@ async def finalize_order(message: Message, state: FSMContext, user_id: int, paym
         parse_mode="HTML"
     )
 
+# --- ПРОВЕРКА КРИПТЫ ---
+@dp.callback_query(F.data.startswith("check_pay_crypto_"))
+async def check_crypto_payment(call: CallbackQuery, state: FSMContext):
+    invoice_id = call.data.split("_")[3]
+    status = await payment_services.check_crypto_invoice_status(invoice_id)
+    # 2. Проверяем, что статус именно 'paid'
+    if status == 'paid':
+        await call.answer("✅ Оплата получена!")
+        await finalize_order(call.message, state, call.from_user.id, "💎 CryptoBot (Оплачено)", "Заказ оплачен онлайн. Спасибо! 🤝")
+    else: await call.answer("❌ Оплата еще не видна. Подождите минуту.", show_alert=True)
+
+
+# --- ПРОВЕРКА ПЕРЕД ОПЛАТОЙ (Pre-Checkout) ---
+@dp.pre_checkout_query()
+async def process_pre_checkout(pre_checkout_query: PreCheckoutQuery):
+    # Здесь можно добавить проверку наличия товара в БД, если нужно.
+    # ok=True означает, что мы разрешаем транзакцию.
+    await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+    return
+
+# --- УСПЕШНАЯ ОПЛАТА (Successful Payment) ---
+@dp.message(F.successful_payment)
+async def process_successful_payment(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    payment_info = message.successful_payment
+    total_amount = payment_info.total_amount / 100  # Переводим копейки обратно в валюту
+    currency = payment_info.currency
+    
+    # Формируем красивый текст для админа
+    payment_label = f"💳 Portmone (Оплачено: {total_amount} {currency})"
+    end_text = "Оплата прошла успешно! Мы уже начали собирать ваш букет. 💐"
+    await finalize_order(message, state, user_id, payment_label, end_text)
+
+# Выбор оплаты
+@dp.callback_query(OrderState.waiting_for_payment_type)
+async def process_payment_selection(call: CallbackQuery, state: FSMContext):
+    payment_type = call.data
+    user = call.from_user
+    user_id = user.id
+
+    # Если нажали "Назад"
+    if payment_type == "back_to_pay_choice":
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💎 Криптовалюта (USDT)", callback_data="pay_crypto")],
+            [InlineKeyboardButton(text="🟠 Portmone (UAH)", callback_data="pay_portmone")],
+            [InlineKeyboardButton(text="💵 На месте", callback_data="pay_onsite")]
+        ])
+        await call.message.edit_text("Выберите удобный способ оплаты:", reply_markup=kb)
+        return
+
+    # Получаем товары
+    items = await get_cart(user_id)
+    if not items:
+        await call.answer("Корзина пуста!", show_alert=True)
+        return
+    total_price = sum(price * qty for _, _, price, qty, _, _ in items)
+
+    # --- 1. КРИПТОВАЛЮТА ---
+    if payment_type == "pay_crypto":
+        await call.message.edit_text("⏳ Создаем счет в CryptoBot...")
+        amount_usdt = round(total_price / 100, 2)
+
+        # !!! ИСПРАВЛЕНИЕ НИЖЕ !!!
+        # Распаковываем 3 значения, которые возвращает payment_services.py
+        full_json, invoice_id, invoice_url = await payment_services.create_crypto_invoice(
+            amount_usdt, f"Order {user_id}", str(user_id)
+        )
+        if not invoice_url:
+            await call.message.edit_text("Ошибка создания счета CryptoBot.")
+            return
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"👉 Оплатить {amount_usdt} USDT", url=invoice_url)],
+            [InlineKeyboardButton(text="🔄 Я оплатил", callback_data=f"check_pay_crypto_{invoice_id}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_pay_choice")]
+        ])
+
+        await call.message.edit_text(f"💎 <b>Оплата CryptoBot</b>\nСумма: {amount_usdt} USDT", reply_markup=kb, parse_mode="HTML")
+        return
+
+    # --- 2. PORTMONE (Telegram Payments) ---
+    if payment_type == "pay_portmone":
+        if not PORTMONE_TOKEN:
+            await call.answer("Ошибка: Токен оплаты не настроен", show_alert=True)
+            return
+        await call.message.delete()
+        await call.message.answer("⏳ Формируем счет...")
+
+        # Цена в копейках (total_price * 100)
+        price_amount = total_price * 100
+        prices = [LabeledPrice(label="Заказ цветов", amount=price_amount)]
+        payload = f"order_{user_id}_{int(datetime.now().timestamp())}"
+
+        await bot.send_invoice(
+            chat_id=call.message.chat.id,
+            title="Оплата заказа",
+            description=f"Заказ цветов для {user.full_name}. Сумма: {total_price} UAH",
+            payload=payload,
+            provider_token=PORTMONE_TOKEN,
+            currency="UAH",
+            prices=prices,
+            start_parameter=f"pay_{user_id}",
+            need_shipping_address=False,
+            is_flexible=False
+        )
+        return
+
+    if payment_type == "pay_onsite":
+        payment_label = "💵 На месте"
+        end_text = "Оплата курьеру при получении. ❤️"
+    else:
+        await call.answer()
+        return
+    await finalize_order(call.message, state, user_id, payment_label, end_text)
+
+user_states = {}
+
 # --- КНОПКА ОТМЕНЫ (на любом этапе) ---
 @dp.callback_query(F.data == "cancel_order")
 async def cancel_fsm(call: CallbackQuery, state: FSMContext):
@@ -612,7 +506,6 @@ async def cancel_fsm(call: CallbackQuery, state: FSMContext):
         await call.message.edit_text("🧺 Ваша корзина пуста — время добавить немного цветов!", reply_markup=kb)
         await call.answer()
         return
-
     # Формируем текст корзины
     lines = []
     total = 0
@@ -621,71 +514,57 @@ async def cancel_fsm(call: CallbackQuery, state: FSMContext):
         total += summ
         # Основная строка
         item_text = f"🔹 <b>{name}</b>\n     {price} ₽ × {qty} шт. = {summ} ₽"
-
         # Если это авторский букет, добавляем состав (он лежит в description)
         if p_type == "created_bouquet" and desc:
             # Убираем "Состав: " для красоты, если оно там есть, и делаем курсивом
             clean_desc = desc.replace("Состав: ", "").strip()
             item_text += f"\n     <i>└ {clean_desc}</i>"
-
         lines.append(item_text)
-
+    
     text = "<b>🧺 Ваша корзина:</b>\n\n" + "\n\n".join(lines) + f"\n\n💰 Итого к оплате: <b>{total} ₽</b>\n\nМы приготовим всё красиво и аккуратно — осталось оформить."
     await call.message.edit_text(text, reply_markup=cart_kb(items), parse_mode="HTML")
     return
-
-
-@dp.message()
-async def fallback_message(message: Message):
-    user_id = message.from_user.id
-    if user_id in user_states and 'waiting_for_qty' in user_states[user_id]:
-        pid = user_states[user_id]['waiting_for_qty']
-        name = user_states[user_id]['product_name']
-        try:
-            qty = int(message.text.strip())
-            if qty <= 0:
-                await message.answer("Количество должно быть положительным целым числом. 🌸")
-                return
-            await add_to_cart(user_id, pid, qty)
-            await message.answer(f"Добавлено {qty} шт. «{name}» в корзину! 🌷 Вы можете продолжить выбор или перейти в корзину.")
-        except ValueError:
-            await message.answer("Пожалуйста, введите целое число. 🌿")
-            return
-        finally:
-            user_states.pop(user_id, None)
-    else:
-        await message.answer("Привет! Отправь /start чтобы открыть каталог 🌿\n\nЕсли нужно быстро связаться с нами — напиши здесь сообщение, и мы ответим как можно скорее. 💌")
-
 
 # --- НОВЫЙ ХЭНДЛЕР ДЛЯ ОФОРМЛЕНИЯ (Вставить ПЕРЕД generic_callback) ---
 @dp.callback_query(F.data == "checkout")
 async def start_checkout_handler(call: CallbackQuery, state: FSMContext):
     user_id = call.from_user.id
-
-    # 1. Проверяем корзину
     items = await get_cart(user_id)
     if not items:
         await call.answer(text="Корзина пуста 😔", show_alert=True)
         return
-
-    # 2. Включаем режим ожидания адреса (FSM)
     await state.set_state(OrderState.waiting_for_address)
 
     # 3. Клавиатура (добавил кнопку Отмена, чтобы можно было выйти)
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_order")]
     ])
-
-    # 4. Изменяем сообщение
     await call.message.edit_text(
         "🎉 <b>Оформление заказа</b>\n\n"
         "Пожалуйста, напишите <b>адрес доставки</b> (Улица, дом, квартира, подъезд). 👇",
-        reply_markup=kb,
+        reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+# --- 1. Обновляем команду /start ---
+@dp.message(F.text == "/start")
+async def cmd_start(message: Message):
+    all_products = await get_all_products()
+    bouquets = [p for p in all_products if p[4] == "bouquet"]
+
+    kb = []
+    # Кнопки теперь ведут на просмотр (view_product_)
+    for pid, name, price, desc, p_type, _ in bouquets:
+        kb.append([InlineKeyboardButton(text=f"👁 {name} — {price} ₽", callback_data=f"view_product_{pid}")])
+
+    kb.append([InlineKeyboardButton(text="🌸 Создать свой букет", callback_data="create_bouquet")])
+    kb.append([InlineKeyboardButton(text="🧺 Перейти в корзину", callback_data="view_cart")])
+
+    await message.answer(
+        "🌿 <b>Bloom & Vibe</b>\n\nНажмите на название букета, чтобы увидеть фото и описание. 👇",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
         parse_mode="HTML"
     )
-
-    # 5. ВАЖНО: Отвечаем телеграму, что нажатие обработано
-    await call.answer()
 
 @dp.callback_query()
 async def generic_callback(call: CallbackQuery, state: FSMContext):
@@ -1265,9 +1144,64 @@ async def generic_callback(call: CallbackQuery, state: FSMContext):
         )
         await call.answer()
         return
-
     # По умолчанию — acknowledge
     await call.answer()
+
+
+
+# ==========================================
+#FSM
+# ==========================================
+
+# --- ШАГ 1: ПОЛУЧАЕМ АДРЕС ---
+@dp.message(OrderState.waiting_for_address)
+async def process_address_input(message: Message, state: FSMContext):
+    address = message.text  # То, что написал пользователь
+    await state.update_data(temp_address=address)
+    await state.set_state(OrderState.waiting_for_address)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Да, всё верно", callback_data="addr_confirm_yes")]])
+    await message.answer(
+        f"Проверим адрес:\n\n<b>{address}</b>\n\nВсё верно?\n<b>Если нет просто отправьте тот адресс который нужно</b>",
+        reply_markup=kb, parse_mode="HTML")
+    return
+
+@dp.message(OrderState.waiting_for_time)
+async def process_time_input(message: Message, state: FSMContext):
+    delivery_time = message.text
+    await state.update_data(delivery_time=delivery_time)
+    await state.set_state(OrderState.waiting_for_payment_type)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 Криптовалюта (USDT)", callback_data="pay_crypto"),
+         InlineKeyboardButton(text="🟠 Portmone (Карта)", callback_data="pay_portmone")], # <--- Добавили
+        [InlineKeyboardButton(text="💵 На месте (при получении)", callback_data="pay_onsite")]
+    ])
+    await message.answer(
+        f"✅ Время доставки: <b>{delivery_time}</b>\n\n"
+        "Остался последний шаг. Выберите удобный способ оплаты: 👇",
+        reply_markup=kb, parse_mode="HTML")
+    return
+
+@dp.message()
+async def fallback_message(message: Message):
+    user_id = message.from_user.id
+    if user_id in user_states and 'waiting_for_qty' in user_states[user_id]:
+        pid = user_states[user_id]['waiting_for_qty']
+        name = user_states[user_id]['product_name']
+        try:
+            qty = int(message.text.strip())
+            if qty <= 0:
+                await message.answer("Количество должно быть положительным целым числом. 🌸")
+                return
+            await add_to_cart(user_id, pid, qty)
+            await message.answer(f"Добавлено {qty} шт. «{name}» в корзину! 🌷 Вы можете продолжить выбор или перейти в корзину.")
+        except ValueError:
+            await message.answer("Пожалуйста, введите целое число. 🌿")
+            return
+        finally:
+            user_states.pop(user_id, None)
+    else:
+        await message.answer("Привет! Отправь /start чтобы открыть каталог 🌿\n\nЕсли нужно быстро связаться с нами — напиши здесь сообщение, и мы ответим как можно скорее. 💌")
 
 # --------- Запуск ---------
 async def main():
@@ -1277,6 +1211,7 @@ async def main():
         await dp.start_polling(bot)
     finally:
         await bot.session.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
