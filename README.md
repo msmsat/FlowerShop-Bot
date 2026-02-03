@@ -55,5 +55,5 @@
 
 ### 1. Клонирование репозитория
 ```bash
-git clone [https://github.com/msmat/FlowerShop-Bot.git](https://github.com/msmat/FlowerShop-Bot.git)
+git clone [https://github.com/msmsat/FlowerShop-Bot.git](https://github.com/msmsat/FlowerShop-Bot.git)
 cd FlowerShop-Bot
