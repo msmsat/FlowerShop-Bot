@@ -548,7 +548,9 @@ async def start_checkout_handler(call: CallbackQuery, state: FSMContext):
 
 # --- 1. Обновляем команду /start ---
 @dp.message(F.text == "/start")
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    
     all_products = await get_all_products()
     bouquets = [p for p in all_products if p[4] == "bouquet"]
 
