@@ -438,7 +438,7 @@ async def process_payment_selection(call: CallbackQuery, state: FSMContext):
     # --- 1. КРИПТОВАЛЮТА ---
     if payment_type == "pay_crypto":
         await call.message.edit_text("⏳ Создаем счет в CryptoBot...")
-        amount_usdt = round(total_price / 100, 2)
+        amount_usdt = round(total_price, 2)
 
         # !!! ИСПРАВЛЕНИЕ НИЖЕ !!!
         # Распаковываем 3 значения, которые возвращает payment_services.py
@@ -449,12 +449,12 @@ async def process_payment_selection(call: CallbackQuery, state: FSMContext):
             await call.message.edit_text("Ошибка создания счета CryptoBot.")
             return
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"👉 Оплатить {amount_usdt} USDT", url=invoice_url)],
+            [InlineKeyboardButton(text=f"👉 Оплатить {amount_usdt} RUB", url=invoice_url)],
             [InlineKeyboardButton(text="🔄 Я оплатил", callback_data=f"check_pay_crypto_{invoice_id}")],
             [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_pay_choice")]
         ])
 
-        await call.message.edit_text(f"💎 <b>Оплата CryptoBot</b>\nСумма: {amount_usdt} USDT", reply_markup=kb, parse_mode="HTML")
+        await call.message.edit_text(f"💎 <b>Оплата CryptoBot</b>\nСумма: {amount_usdt} RUB", reply_markup=kb, parse_mode="HTML")
         return
 
     # --- 2. PORTMONE (Telegram Payments) ---
